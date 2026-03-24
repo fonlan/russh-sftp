@@ -29,38 +29,6 @@ use crate::{
 pub type SftpResult<T> = Result<T, Error>;
 type SharedRequests = HashMap<Option<u32>, mpsc::Sender<SftpResult<Packet>>>;
 
-fn packet_type_name(packet: &Packet) -> &'static str {
-    match packet {
-        Packet::Init(_) => "INIT",
-        Packet::Version(_) => "VERSION",
-        Packet::Open(_) => "OPEN",
-        Packet::Close(_) => "CLOSE",
-        Packet::Read(_) => "READ",
-        Packet::Write(_) => "WRITE",
-        Packet::Lstat(_) => "LSTAT",
-        Packet::Fstat(_) => "FSTAT",
-        Packet::SetStat(_) => "SETSTAT",
-        Packet::FSetStat(_) => "FSETSTAT",
-        Packet::OpenDir(_) => "OPENDIR",
-        Packet::ReadDir(_) => "READDIR",
-        Packet::Remove(_) => "REMOVE",
-        Packet::MkDir(_) => "MKDIR",
-        Packet::RmDir(_) => "RMDIR",
-        Packet::RealPath(_) => "REALPATH",
-        Packet::Stat(_) => "STAT",
-        Packet::Rename(_) => "RENAME",
-        Packet::ReadLink(_) => "READLINK",
-        Packet::Symlink(_) => "SYMLINK",
-        Packet::Status(_) => "STATUS",
-        Packet::Handle(_) => "HANDLE",
-        Packet::Data(_) => "DATA",
-        Packet::Name(_) => "NAME",
-        Packet::Attrs(_) => "ATTRS",
-        Packet::Extended(_) => "EXTENDED",
-        Packet::ExtendedReply(_) => "EXTENDED_REPLY",
-    }
-}
-
 pub(crate) struct SessionInner {
     version: Option<u32>,
     requests: Arc<SharedRequests>,
@@ -68,11 +36,8 @@ pub(crate) struct SessionInner {
 
 impl SessionInner {
     pub async fn reply(&mut self, id: Option<u32>, packet: Packet) -> SftpResult<()> {
-        let packet_type = packet_type_name(&packet);
         let requests = self.requests.pin();
-        let pending_before = requests.len();
         if let Some(sender) = requests.remove(&id) {
-            let pending_after = requests.len();
             let validate = if id.is_some() && self.version.is_none() {
                 Err(Error::UnexpectedPacket)
             } else if id.is_none() && self.version.is_some() {
@@ -80,46 +45,11 @@ impl SessionInner {
             } else {
                 Ok(())
             };
-
-            match sender.try_send(validate.clone().map(|_| packet)) {
-                Ok(()) => {
-                    info!(
-                        target: "sftp::rawsession_reply",
-                        "russh-sftp reply delivered to waiter: request_id={:?} packet_type={} pending_before={} pending_after={} version={:?} valid={}",
-                        id,
-                        packet_type,
-                        pending_before,
-                        pending_after,
-                        self.version,
-                        validate.is_ok()
-                    );
-                }
-                Err(error) => {
-                    warn!(
-                        target: "sftp::rawsession_reply",
-                        "russh-sftp reply failed to reach waiter: request_id={:?} packet_type={} pending_before={} pending_after={} version={:?} error={}",
-                        id,
-                        packet_type,
-                        pending_before,
-                        pending_after,
-                        self.version,
-                        error
-                    );
-                    return Err(Error::UnexpectedBehavior(error.to_string()));
-                }
-            }
-
+            sender
+                .try_send(validate.clone().map(|_| packet))
+                .map_err(|error| Error::UnexpectedBehavior(error.to_string()))?;
             return validate;
         }
-
-        warn!(
-            target: "sftp::rawsession_reply",
-            "russh-sftp reply packet had no registered waiter: request_id={:?} packet_type={} pending_requests={} version={:?}",
-            id,
-            packet_type,
-            pending_before,
-            self.version
-        );
         Err(Error::UnexpectedBehavior(format!(
             "Packet {:?} for unknown recipient",
             id
@@ -265,91 +195,31 @@ impl RawSftpSession {
     }
 
     async fn send(&self, id: Option<u32>, packet: Packet) -> SftpResult<Packet> {
-        let packet_type = packet_type_name(&packet);
         if self.tx.is_closed() {
             return Err(Error::UnexpectedBehavior("session closed".into()));
         }
-
         let (tx, mut rx) = mpsc::channel(1);
-        let (pending_before, pending_after_register) = {
+        {
             let requests = self.requests.pin();
-            let pending_before = requests.len();
             requests.insert(id, tx);
-            let pending_after_register = requests.len();
-            (pending_before, pending_after_register)
-        };
-
-        info!(
-            target: "sftp::rawsession_send",
-            "russh-sftp request registered: request_id={:?} packet_type={} pending_before={} pending_after={}",
-            id,
-            packet_type,
-            pending_before,
-            pending_after_register
-        );
-
+        }
         let bytes = Bytes::try_from(packet)?;
         if let Err(error) = self.tx.send(bytes) {
             let requests = self.requests.pin();
-            let removed = requests.remove(&id).is_some();
-            warn!(
-                target: "sftp::rawsession_send",
-                "russh-sftp request failed before stream send: request_id={:?} packet_type={} removed_waiter={} error={}",
-                id,
-                packet_type,
-                removed,
-                error
-            );
+            requests.remove(&id);
             return Err(error.into());
         }
-
-        info!(
-            target: "sftp::rawsession_send",
-            "russh-sftp request forwarded to stream task: request_id={:?} packet_type={}",
-            id,
-            packet_type
-        );
-
         let timeout = *self.options.timeout.read().await;
         match time::timeout(Duration::from_secs(timeout), rx.recv()).await {
-            Ok(Some(result)) => {
-                info!(
-                    target: "sftp::rawsession_send",
-                    "russh-sftp request completed: request_id={:?} packet_type={} response_ok={}",
-                    id,
-                    packet_type,
-                    result.is_ok()
-                );
-                result
-            }
+            Ok(Some(result)) => result,
             Ok(None) => {
                 let requests = self.requests.pin();
-                let removed = requests.remove(&id).is_some();
-                let pending_after = requests.len();
-                warn!(
-                    target: "sftp::rawsession_send",
-                    "russh-sftp waiter channel closed before reply: request_id={:?} packet_type={} removed_waiter={} pending_after={}",
-                    id,
-                    packet_type,
-                    removed,
-                    pending_after
-                );
+                requests.remove(&id);
                 Err(Error::UnexpectedBehavior("recv none message".into()))
             }
             Err(error) => {
                 let requests = self.requests.pin();
-                let removed = requests.remove(&id).is_some();
-                let pending_after = requests.len();
-                warn!(
-                    target: "sftp::rawsession_send",
-                    "russh-sftp request timed out waiting for reply: request_id={:?} packet_type={} timeout_secs={} removed_waiter={} pending_after={} error={}",
-                    id,
-                    packet_type,
-                    timeout,
-                    removed,
-                    pending_after,
-                    error
-                );
+                requests.remove(&id);
                 Err(error.into())
             }
         }

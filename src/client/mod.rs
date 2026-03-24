@@ -16,38 +16,6 @@ use tokio::{
 
 use crate::{error::Error, protocol::Packet, utils::read_packet};
 
-fn packet_summary(packet: &Packet) -> (&'static str, Option<u32>) {
-    match packet {
-        Packet::Version(_) => ("VERSION", None),
-        Packet::Status(p) => ("STATUS", Some(p.id)),
-        Packet::Handle(p) => ("HANDLE", Some(p.id)),
-        Packet::Data(p) => ("DATA", Some(p.id)),
-        Packet::Name(p) => ("NAME", Some(p.id)),
-        Packet::Attrs(p) => ("ATTRS", Some(p.id)),
-        Packet::ExtendedReply(p) => ("EXTENDED_REPLY", Some(p.id)),
-        Packet::Open(p) => ("OPEN", Some(p.id)),
-        Packet::Close(p) => ("CLOSE", Some(p.id)),
-        Packet::Read(p) => ("READ", Some(p.id)),
-        Packet::Write(p) => ("WRITE", Some(p.id)),
-        Packet::Lstat(p) => ("LSTAT", Some(p.id)),
-        Packet::Fstat(p) => ("FSTAT", Some(p.id)),
-        Packet::SetStat(p) => ("SETSTAT", Some(p.id)),
-        Packet::FSetStat(p) => ("FSETSTAT", Some(p.id)),
-        Packet::OpenDir(p) => ("OPENDIR", Some(p.id)),
-        Packet::ReadDir(p) => ("READDIR", Some(p.id)),
-        Packet::Remove(p) => ("REMOVE", Some(p.id)),
-        Packet::MkDir(p) => ("MKDIR", Some(p.id)),
-        Packet::RmDir(p) => ("RMDIR", Some(p.id)),
-        Packet::RealPath(p) => ("REALPATH", Some(p.id)),
-        Packet::Stat(p) => ("STAT", Some(p.id)),
-        Packet::Rename(p) => ("RENAME", Some(p.id)),
-        Packet::ReadLink(p) => ("READLINK", Some(p.id)),
-        Packet::Symlink(p) => ("SYMLINK", Some(p.id)),
-        Packet::Init(_) => ("INIT", None),
-        Packet::Extended(p) => ("EXTENDED", Some(p.id)),
-    }
-}
-
 macro_rules! into_wrap {
     ($handler:expr) => {
         match $handler.await {
@@ -62,14 +30,6 @@ where
     H: Handler + Send,
 {
     let packet = Packet::try_from(bytes)?;
-    let (packet_type, request_id) = packet_summary(&packet);
-    info!(
-        target: "sftp::rawsession_handler",
-        "russh-sftp handler received packet: packet_type={} request_id={:?}",
-        packet_type,
-        request_id
-    );
-
     match packet {
         Packet::Version(p) => into_wrap!(handler.version(p)),
         Packet::Status(p) => into_wrap!(handler.status(p)),
